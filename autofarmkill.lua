@@ -155,6 +155,9 @@ end
 -- =====================================================
 --  TELEPORT PHASE - LIÊN TỤC THEO TARGET
 -- =====================================================
+-- =====================================================
+--  TELEPORT PHASE - dùng step-teleport theo target liên tục
+-- =====================================================
 local function teleportPhase()
     setNoclip(true)
 
@@ -182,41 +185,48 @@ local function teleportPhase()
     pcall(function() sinkConn:Disconnect() end)
     if isDead or stopped then return end
 
-    -- Lấy Y hiện tại (dưới đất)
+    -- Lấy Y cố định dưới đất
     local h = getHRP()
     if not h then return end
     local lockedY = h.Position.Y
 
-    -- LIÊN TỤC THEO TARGET cho đến khi chết/dừng
-    setStatus("🔄 Đang theo dõi target...", Color3.fromRGB(255,200,50))
+    -- ── STEP-TELEPORT LOOP (từ NMA MOV) ──
+    -- target là Vector3 cập nhật liên tục theo player
+    local followTarget = nil
 
-    local followConn
-    followConn = RS.Heartbeat:Connect(function(dt)
-        if isDead or stopped then
-            pcall(function() followConn:Disconnect() end)
-            return
+    -- Thread cập nhật followTarget theo target player
+    local updateConn = RS.Heartbeat:Connect(function()
+        local thrp = getTargetHRP()
+        if thrp then
+            -- Giữ Y dưới đất, chỉ theo X,Z của target
+            followTarget = Vector3.new(thrp.Position.X, lockedY, thrp.Position.Z)
         end
+    end)
+
+    -- Step-teleport loop: di chuyển từng bước về followTarget
+    local stepConn = RS.Heartbeat:Connect(function(dt)
+        if isDead or stopped then return end
+        if not followTarget then return end
 
         local hrp2 = getHRP()
-        local thrp = getTargetHRP()
-        if not hrp2 or not thrp then return end
+        if not hrp2 then return end
 
-        -- Luôn cập nhật lockedY theo target (phòng target lên cao/xuống thấp)
-        -- giữ Y dưới đất ổn định, chỉ di chuyển X,Z
-        local dest = Vector3.new(thrp.Position.X, lockedY, thrp.Position.Z)
-        local dir  = dest - hrp2.Position
+        local dir  = followTarget - hrp2.Position
         local dist = dir.Magnitude
+        local step = cfg.speed * dt
 
-        if dist < 2 then
-            -- Đã sát target → cập nhật status
-            setStatus("✅ Sát target: " .. cfg.targetName, Color3.fromRGB(80,220,130))
+        if dist <= step then
+            -- Đã sát → snap vào luôn
+            hrp2.CFrame = CFrame.new(followTarget)
+            hrp2.AssemblyLinearVelocity  = Vector3.zero
+            hrp2.AssemblyAngularVelocity = Vector3.zero
+            setStatus("✅ Sát " .. cfg.targetName, Color3.fromRGB(80,220,130))
             return
         end
 
-        -- Di chuyển về phía target
-        local step   = cfg.speed * dt
-        local newPos = hrp2.Position + dir.Unit * math.min(step, dist)
-        hrp2.CFrame  = CFrame.new(newPos.X, lockedY, newPos.Z)
+        -- Di chuyển step
+        local newPos = hrp2.Position + dir.Unit * step
+        hrp2.CFrame  = CFrame.new(newPos)
         hrp2.AssemblyLinearVelocity  = Vector3.zero
         hrp2.AssemblyAngularVelocity = Vector3.zero
 
@@ -224,46 +234,13 @@ local function teleportPhase()
             Color3.fromRGB(255,200,50))
     end)
 
-    -- Giữ phase này sống cho đến khi chết/dừng
+    -- Giữ phase sống đến khi chết/dừng
     while not isDead and not stopped do
         task.wait(0.5)
     end
-    pcall(function() followConn:Disconnect() end)
-end
 
--- =====================================================
---  MAIN SEQUENCE - đi bộ 1 lần rồi follow mãi
--- =====================================================
-local function runSequence()
-    if _G.PTP_Main then task.cancel(_G.PTP_Main) end
-    _G.PTP_Main = task.spawn(function()
-        while true do
-            -- Chờ điều kiện hợp lệ
-            while not cfg.active or cfg.targetName == "" or stopped do
-                task.wait(0.5)
-            end
-
-            local hum = getHum()
-            if not hum or hum.Health <= 0 then task.wait(0.5); continue end
-
-            -- Bước 1: Đi bộ pathfinding lại gần
-            setStatus("🚶 Đi bộ lại gần...", Color3.fromRGB(100,180,255))
-            walkPhase()
-            if isDead or stopped then task.wait(0.5); continue end
-
-            -- Bước 2: Chui đất + LIÊN TỤC follow cho đến khi chết
-            teleportPhase()
-
-            -- Sau khi thoát (chết/dừng) → chờ respawn
-            if isDead then
-                setStatus("💀 Chờ respawn...", Color3.fromRGB(200,80,80))
-                -- CharacterAdded sẽ tự restart
-                task.wait(1)
-            end
-
-            task.wait(0.5)
-        end
-    end)
+    pcall(function() updateConn:Disconnect() end)
+    pcall(function() stepConn:Disconnect()   end)
 end
 
 -- =====================================================
