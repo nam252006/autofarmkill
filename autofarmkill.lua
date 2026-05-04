@@ -590,6 +590,48 @@ UIS.InputChanged:Connect(function(i)
     wF.Size=UDim2.fromScale(t,1); wV.Text=tostring(cfg.walkTime).."s"; save()
 end)
 
+-- ========== SINK DEPTH SLIDER ==========
+mkDiv(210)
+mkLbl(216, "Độ sâu chui xuống (studs)")
+local dT = Instance.new("Frame", main)
+dT.Size             = UDim2.new(1,-16,0,6)
+dT.Position         = UDim2.fromOffset(8, 232)
+dT.BackgroundColor3 = Color3.fromRGB(30,30,44)
+dT.BorderSizePixel  = 0
+Instance.new("UICorner", dT).CornerRadius = UDim.new(1,0)
+
+local dF = Instance.new("Frame", dT)
+dF.Size             = UDim2.fromScale((cfg.sinkDepth or 15) / 50, 1)
+dF.BackgroundColor3 = Color3.fromRGB(160,80,220)
+dF.BorderSizePixel  = 0
+Instance.new("UICorner", dF).CornerRadius = UDim.new(1,0)
+
+local dV = Instance.new("TextLabel", main)
+dV.Size             = UDim2.new(1,-16,0,14)
+dV.Position         = UDim2.fromOffset(8, 216)
+dV.BackgroundTransparency = 1
+dV.Text             = tostring(cfg.sinkDepth or 15).." studs"
+dV.TextColor3       = Color3.fromRGB(160,80,220)
+dV.Font             = Enum.Font.GothamBold
+dV.TextSize         = 10
+dV.TextXAlignment   = Enum.TextXAlignment.Right
+
+local dSld = false
+dT.InputBegan:Connect(function(i)
+    if i.UserInputType == Enum.UserInputType.MouseButton1 then dSld = true end
+end)
+UIS.InputEnded:Connect(function(i)
+    if i.UserInputType == Enum.UserInputType.MouseButton1 then dSld = false end
+end)
+UIS.InputChanged:Connect(function(i)
+    if not dSld or i.UserInputType ~= Enum.UserInputType.MouseMovement then return end
+    local t = math.clamp((i.Position.X - dT.AbsolutePosition.X) / dT.AbsoluteSize.X, 0, 1)
+    cfg.sinkDepth = math.floor(1 + t * 49)  -- range 1 đến 50 studs
+    dF.Size = UDim2.fromScale(t, 1)
+    dV.Text = tostring(cfg.sinkDepth).." studs"
+    save()
+end)
+
 mkDiv(245)
 
 -- TP Speed slider
