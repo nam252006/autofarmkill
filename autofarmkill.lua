@@ -1,7 +1,7 @@
 -- =====================================================
 --  PLAYER TELEPORT v5 - WALK THEN TELEPORT
---  Đi bộ pathfinding trước → rồi teleport CFrame
---  Chết → respawn → lặp lại
+--  Đi bộ pathfinding trước → chui đất → teleport
+--  Chết → chờ respawn → lặp lại tự động
 --  P = toggle | N = noclip | X = stop
 -- =====================================================
 
@@ -21,7 +21,8 @@ local cfg = {
     active       = true,
     speed        = 80,
     offset       = 3,
-    walkTime     = 5,   -- giây đi bộ trước khi teleport
+    walkTime     = 5,
+    sinkDepth    = 15,
     manualNoclip = false,
 }
 
@@ -97,17 +98,14 @@ _G.PTP_Noclip = RS.Stepped:Connect(function()
 end)
 
 -- =====================================================
---  BƯỚC 1: ĐI BỘ PATHFINDING (tự nhiên, không CFrame)
+--  BƯỚC 1: ĐI BỘ PATHFINDING
 -- =====================================================
 local function walkPhase()
     local hum = getHum()
     if not hum then return end
-
-    -- walkspeed bình thường
     hum.WalkSpeed = 16
 
     local startTime = tick()
-
     while tick() - startTime < cfg.walkTime do
         if isDead or stopped then return end
 
@@ -133,52 +131,41 @@ local function walkPhase()
             for i = 2, #wps do
                 if isDead or stopped then return end
                 if tick() - startTime >= cfg.walkTime then return end
-
                 local wp = wps[i]
                 if wp.Action == Enum.PathWaypointAction.Jump then
                     hum.Jump = true
                 end
-
                 hum:MoveTo(wp.Position)
                 hum.MoveToFinished:Wait(2)
-
                 local rem = math.max(0, math.ceil(cfg.walkTime - (tick() - startTime)))
                 setStatus("🚶 Đi bộ... " .. rem .. "s", Color3.fromRGB(100,180,255))
             end
         else
-            -- fallback nếu path thất bại
             local thrp2 = getTargetHRP()
-            if thrp2 then
-                hum:MoveTo(thrp2.Position)
-                task.wait(1)
-            end
+            if thrp2 then hum:MoveTo(thrp2.Position); task.wait(1) end
         end
-
         task.wait(0.1)
     end
-
-    -- reset walkspeed
     hum.WalkSpeed = 16
 end
 
 -- =====================================================
---  BƯỚC 2: TELEPORT BẰNG CFRAME (như script gốc)
+--  BƯỚC 2: CHUI ĐẤT + TELEPORT
 -- =====================================================
 local function teleportPhase()
     setNoclip(true)
     setStatus("⬇️ Chui xuống đất...", Color3.fromRGB(180,120,255))
 
-    -- BƯỚC 1: chui xuống đúng 15 studs, lock Y liên tục
     local hrp = getHRP()
     if not hrp then return end
-    local undergroundY = hrp.Position.Y - 15
+    local undergroundY = hrp.Position.Y - (cfg.sinkDepth or 15)
 
+    -- chui xuống
     local sinkConn
     sinkConn = RS.Heartbeat:Connect(function(dt)
         local h = getHRP()
         if not h then sinkConn:Disconnect() return end
         if h.Position.Y <= undergroundY then sinkConn:Disconnect() return end
-        -- di chuyển xuống + tắt gravity bằng cách set velocity = 0
         h.CFrame = CFrame.new(h.Position.X, h.Position.Y - 60*dt, h.Position.Z)
         h.AssemblyLinearVelocity = Vector3.zero
         h.AssemblyAngularVelocity = Vector3.zero
@@ -192,12 +179,11 @@ local function teleportPhase()
     pcall(function() sinkConn:Disconnect() end)
     if isDead or stopped then return end
 
-    -- lưu Y dưới đất
     local h = getHRP()
     if not h then return end
-    local lockedY = h.Position.Y  -- giữ Y này trong suốt quá trình di chuyển ngang
+    local lockedY = h.Position.Y
 
-    -- BƯỚC 2: teleport ngang đến X,Z của target, LOCK Y không cho rơi
+    -- di chuyển ngang đến X,Z của target, lock Y
     setStatus("⚡ Teleport dưới đất...", Color3.fromRGB(255,200,50))
 
     local tpConn
@@ -206,18 +192,14 @@ local function teleportPhase()
         local hrp2 = getHRP()
         local thrp = getTargetHRP()
         if not hrp2 or not thrp then return end
-
         local dest = Vector3.new(thrp.Position.X, lockedY, thrp.Position.Z)
         local dir  = dest - hrp2.Position
         local dist = dir.Magnitude
-
         if dist < 3 then tpConn:Disconnect() return end
-
-        local step = cfg.speed * dt
-        -- set CFrame với Y luôn = lockedY, không cho gravity kéo
+        local step   = cfg.speed * dt
         local newPos = hrp2.Position + dir.Unit * math.min(step, dist)
-        hrp2.CFrame = CFrame.new(newPos.X, lockedY, newPos.Z)
-        hrp2.AssemblyLinearVelocity = Vector3.zero
+        hrp2.CFrame  = CFrame.new(newPos.X, lockedY, newPos.Z)
+        hrp2.AssemblyLinearVelocity  = Vector3.zero
         hrp2.AssemblyAngularVelocity = Vector3.zero
     end)
 
@@ -233,7 +215,7 @@ local function teleportPhase()
     pcall(function() tpConn:Disconnect() end)
     if isDead or stopped then return end
 
-    -- BƯỚC 3: nổi lên đến target, lock X,Z không cho trôi
+    -- nổi lên đến target
     setStatus("⬆️ Nổi lên...", Color3.fromRGB(100,255,150))
 
     local riseConn
@@ -242,21 +224,18 @@ local function teleportPhase()
         local hrp3 = getHRP()
         local thrp = getTargetHRP()
         if not hrp3 or not thrp then riseConn:Disconnect() return end
-
         local dest = thrp.Position + Vector3.new(0, cfg.offset, 0)
         local dir  = dest - hrp3.Position
         local dist = dir.Magnitude
-
         if dist < 2 then
             riseConn:Disconnect()
             setStatus("✅ Đã đến!", Color3.fromRGB(80,220,130))
             return
         end
-
-        local step = cfg.speed * dt
+        local step   = cfg.speed * dt
         local newPos = hrp3.Position + dir.Unit * math.min(step, dist)
-        hrp3.CFrame = CFrame.new(newPos)
-        hrp3.AssemblyLinearVelocity = Vector3.zero
+        hrp3.CFrame  = CFrame.new(newPos)
+        hrp3.AssemblyLinearVelocity  = Vector3.zero
         hrp3.AssemblyAngularVelocity = Vector3.zero
     end)
 
@@ -273,58 +252,29 @@ end
 --  MAIN SEQUENCE
 -- =====================================================
 local function runSequence()
+    if _G.PTP_Main then task.cancel(_G.PTP_Main) end
     _G.PTP_Main = task.spawn(function()
         while true do
-            -- chờ active + có target
             while not cfg.active or cfg.targetName == "" or stopped do
                 task.wait(0.5)
             end
 
-            -- chờ nhân vật load
-            if not lp.Character then
-                lp.CharacterAdded:Wait()
-                task.wait(1.5)
-            end
-
             local hum = getHum()
-            if not hum then task.wait(0.5); continue end
+            if not hum or hum.Health <= 0 then task.wait(0.5); continue end
 
-            -- nếu đang chết thì chờ respawn
-            if hum.Health <= 0 or isDead then
-                setStatus("💀 Chờ respawn...", Color3.fromRGB(200,80,80))
-                lp.CharacterAdded:Wait()
-                task.wait(2)
-                isDead = false
-                if not cfg.active or stopped then continue end
-            end
-
-            -- theo dõi khi chết
-            local curHum = getHum()
-            if curHum then
-                curHum.Died:Connect(function()
-                    isDead = true
-                    if not cfg.manualNoclip then setNoclip(false) end
-                    setStatus("💀 Đã chết! Chờ respawn...", Color3.fromRGB(200,80,80))
-                end)
-            end
-
-            -- BƯỚC 1: đi bộ
+            -- đi bộ
             walkPhase()
+            if isDead or stopped then task.wait(0.5); continue end
 
-            if isDead or stopped then
-                task.wait(0.5)
-                continue
-            end
-
-            -- BƯỚC 2: teleport CFrame
+            -- chui đất + teleport
             teleportPhase()
+            if isDead or stopped then task.wait(0.5); continue end
 
-            -- chờ đến khi chết để restart
+            -- chờ chết
             setStatus("✅ Đã đến! Chờ lần tiếp...", Color3.fromRGB(80,220,130))
             while not isDead and not stopped do
                 task.wait(0.5)
             end
-
             task.wait(0.5)
         end
     end)
@@ -353,14 +303,52 @@ local function stopTP(reason)
 end
 
 -- =====================================================
---  HOTKEYS  P / N / X
+--  RESPAWN - chờ load xong mới bắt đầu
+-- =====================================================
+_G.PTP_RespConn = lp.CharacterAdded:Connect(function(char)
+    char:WaitForChild("HumanoidRootPart")
+    char:WaitForChild("Humanoid")
+
+    isDead  = false
+    stopped = false
+    if _G.PTP_Main then task.cancel(_G.PTP_Main); _G.PTP_Main = nil end
+
+    setStatus("⏳ Chờ respawn...", Color3.fromRGB(200,200,80))
+
+    -- chờ health > 0
+    local hum = char:FindFirstChildOfClass("Humanoid")
+    if not hum then return end
+    while hum.Health <= 0 do task.wait(0.1) end
+
+    -- chờ thêm 2s cho chắc
+    task.wait(2)
+
+    if not cfg.active or cfg.targetName == "" then
+        setStatus("Nhập tên player để bắt đầu")
+        return
+    end
+
+    -- theo dõi chết
+    hum.Died:Connect(function()
+        isDead  = true
+        stopped = true
+        if not cfg.manualNoclip then setNoclip(false) end
+        setStatus("💀 Đã chết! Chờ respawn...", Color3.fromRGB(200,80,80))
+    end)
+
+    setStatus("✅ Đã respawn! Bắt đầu...", Color3.fromRGB(80,220,130))
+    task.wait(0.5)
+    runSequence()
+end)
+
+-- =====================================================
+--  HOTKEYS
 -- =====================================================
 _G.PTP_Input = UIS.InputBegan:Connect(function(input, gp)
     if gp then return end
     if input.KeyCode == Enum.KeyCode.P then
         cfg.active = not cfg.active; save()
-        if not cfg.active then stopTP("Đã tắt (P)")
-        else startTP() end
+        if not cfg.active then stopTP("Đã tắt (P)") else startTP() end
     end
     if input.KeyCode == Enum.KeyCode.N then
         cfg.manualNoclip = not cfg.manualNoclip; save()
@@ -368,38 +356,22 @@ _G.PTP_Input = UIS.InputBegan:Connect(function(input, gp)
         setStatus("Noclip: " .. (cfg.manualNoclip and "ON" or "OFF"),
             cfg.manualNoclip and Color3.fromRGB(255,200,60) or Color3.fromRGB(200,140,70))
     end
-    if input.KeyCode == Enum.KeyCode.X then
-        stopTP("Dừng (X)")
-    end
+    if input.KeyCode == Enum.KeyCode.X then stopTP("Dừng (X)") end
 end)
 
 -- =====================================================
---  RESPAWN
+--  UI
 -- =====================================================
-_G.PTP_RespConn = lp.CharacterAdded:Connect(function(char)
-    char:WaitForChild("HumanoidRootPart")
-    isDead = false
-    task.wait(2)
-    if cfg.active and cfg.targetName ~= "" and not stopped then
-        setStatus("🔄 Respawned → bắt đầu lại")
-    end
-end)
-
--- =====================================================
---  UI (giữ nguyên từ v5 gốc)
--- =====================================================
-if lp.PlayerGui:FindFirstChild("PTP5") then
-    lp.PlayerGui.PTP5:Destroy()
-end
+if lp.PlayerGui:FindFirstChild("PTP5") then lp.PlayerGui.PTP5:Destroy() end
 
 local sg = Instance.new("ScreenGui")
 sg.Name = "PTP5"; sg.ResetOnSpawn = false; sg.Parent = lp.PlayerGui
 
 local main = Instance.new("Frame", sg)
-main.Size = UDim2.fromOffset(265, 310)
-main.Position = UDim2.fromOffset(20, 140)
+main.Size             = UDim2.fromOffset(265, 460)
+main.Position         = UDim2.fromOffset(20, 140)
 main.BackgroundColor3 = Color3.fromRGB(14,14,19)
-main.BorderSizePixel = 0
+main.BorderSizePixel  = 0
 Instance.new("UICorner", main).CornerRadius = UDim.new(0,10)
 
 local sh = Instance.new("Frame", main)
@@ -443,7 +415,8 @@ end)
 
 local statLbl = Instance.new("TextLabel", main)
 statLbl.Size = UDim2.new(1,-16,0,20); statLbl.Position = UDim2.fromOffset(8,42)
-statLbl.BackgroundColor3 = Color3.fromRGB(22,22,30); statLbl.TextColor3 = Color3.fromRGB(110,200,130)
+statLbl.BackgroundColor3 = Color3.fromRGB(22,22,30)
+statLbl.TextColor3 = Color3.fromRGB(110,200,130)
 statLbl.Font = Enum.Font.Code; statLbl.TextSize = 10; statLbl.Text = "> idle"
 statLbl.TextXAlignment = Enum.TextXAlignment.Left; statLbl.BorderSizePixel = 0
 statLbl.ClipsDescendants = true
@@ -502,7 +475,34 @@ local function mkToggle(y,label,init,onChange)
     rb.Size=UDim2.new(1,-56,1,0); rb.BackgroundTransparency=1; rb.Text=""
     rb.MouseButton1Click:Connect(toggle)
 end
+local function mkSlider(yLbl, yBar, label, min, max, valCfg, color, fmt, onChange)
+    mkLbl(yLbl, label)
+    local bar=Instance.new("Frame",main)
+    bar.Size=UDim2.new(1,-16,0,6); bar.Position=UDim2.fromOffset(8,yBar)
+    bar.BackgroundColor3=Color3.fromRGB(30,30,44); bar.BorderSizePixel=0
+    Instance.new("UICorner",bar).CornerRadius=UDim.new(1,0)
+    local fill=Instance.new("Frame",bar)
+    fill.Size=UDim2.fromScale((valCfg-min)/(max-min),1)
+    fill.BackgroundColor3=color; fill.BorderSizePixel=0
+    Instance.new("UICorner",fill).CornerRadius=UDim.new(1,0)
+    local valLbl=Instance.new("TextLabel",main)
+    valLbl.Size=UDim2.new(1,-16,0,14); valLbl.Position=UDim2.fromOffset(8,yLbl)
+    valLbl.BackgroundTransparency=1; valLbl.Text=fmt(valCfg)
+    valLbl.TextColor3=color; valLbl.Font=Enum.Font.GothamBold
+    valLbl.TextSize=10; valLbl.TextXAlignment=Enum.TextXAlignment.Right
+    local sld=false
+    bar.InputBegan:Connect(function(i) if i.UserInputType==Enum.UserInputType.MouseButton1 then sld=true end end)
+    UIS.InputEnded:Connect(function(i) if i.UserInputType==Enum.UserInputType.MouseButton1 then sld=false end end)
+    UIS.InputChanged:Connect(function(i)
+        if not sld or i.UserInputType~=Enum.UserInputType.MouseMovement then return end
+        local t=math.clamp((i.Position.X-bar.AbsolutePosition.X)/bar.AbsoluteSize.X,0,1)
+        local val=math.floor(min+t*(max-min))
+        fill.Size=UDim2.fromScale(t,1); valLbl.Text=fmt(val)
+        onChange(val); save()
+    end)
+end
 
+-- ===== NAME INPUT =====
 mkLbl(70,"Tên người chơi")
 local nameBg=Instance.new("Frame",main)
 nameBg.Size=UDim2.new(1,-16,0,30); nameBg.Position=UDim2.fromOffset(8,84)
@@ -554,6 +554,7 @@ local function refreshDrop(f)
 end
 nameBox:GetPropertyChangedSignal("Text"):Connect(function() refreshDrop(nameBox.Text) end)
 
+-- ===== TOGGLES =====
 mkDiv(122)
 mkToggle(128,"Bật script",cfg.active,function(on)
     cfg.active=on; save()
@@ -563,249 +564,144 @@ mkDiv(166)
 mkToggle(172,"Noclip thường trực",cfg.manualNoclip,function(on)
     cfg.manualNoclip=on; save(); setNoclip(on)
 end)
+
+-- ===== SLIDERS =====
 mkDiv(210)
+mkSlider(216, 232, "Thời gian đi bộ (giây)", 1, 20, cfg.walkTime,
+    Color3.fromRGB(80,180,255),
+    function(v) return v.."s" end,
+    function(v) cfg.walkTime=v end)
 
--- Walk time slider
-mkLbl(216,"Thời gian đi bộ (giây)")
-local wT=Instance.new("Frame",main)
-wT.Size=UDim2.new(1,-16,0,6); wT.Position=UDim2.fromOffset(8,232)
-wT.BackgroundColor3=Color3.fromRGB(30,30,44); wT.BorderSizePixel=0
-Instance.new("UICorner",wT).CornerRadius=UDim.new(1,0)
-local wF=Instance.new("Frame",wT)
-wF.Size=UDim2.fromScale((cfg.walkTime-1)/19,1)
-wF.BackgroundColor3=Color3.fromRGB(80,180,255); wF.BorderSizePixel=0
-Instance.new("UICorner",wF).CornerRadius=UDim.new(1,0)
-local wV=Instance.new("TextLabel",main)
-wV.Size=UDim2.new(1,-16,0,14); wV.Position=UDim2.fromOffset(8,216)
-wV.BackgroundTransparency=1; wV.Text=tostring(cfg.walkTime).."s"
-wV.TextColor3=Color3.fromRGB(80,180,255); wV.Font=Enum.Font.GothamBold
-wV.TextSize=10; wV.TextXAlignment=Enum.TextXAlignment.Right
-local wSld=false
-wT.InputBegan:Connect(function(i) if i.UserInputType==Enum.UserInputType.MouseButton1 then wSld=true end end)
-UIS.InputEnded:Connect(function(i) if i.UserInputType==Enum.UserInputType.MouseButton1 then wSld=false end end)
-UIS.InputChanged:Connect(function(i)
-    if not wSld or i.UserInputType~=Enum.UserInputType.MouseMovement then return end
-    local t=math.clamp((i.Position.X-wT.AbsolutePosition.X)/wT.AbsoluteSize.X,0,1)
-    cfg.walkTime=math.floor(1+t*19)
-    wF.Size=UDim2.fromScale(t,1); wV.Text=tostring(cfg.walkTime).."s"; save()
-end)
+mkDiv(242)
+mkSlider(248, 264, "Độ sâu chui xuống (studs)", 1, 50, cfg.sinkDepth,
+    Color3.fromRGB(160,80,220),
+    function(v) return v.." studs" end,
+    function(v) cfg.sinkDepth=v end)
 
--- ========== SINK DEPTH SLIDER ==========
-mkDiv(210)
-mkLbl(216, "Độ sâu chui xuống (studs)")
-local dT = Instance.new("Frame", main)
-dT.Size             = UDim2.new(1,-16,0,6)
-dT.Position         = UDim2.fromOffset(8, 232)
-dT.BackgroundColor3 = Color3.fromRGB(30,30,44)
-dT.BorderSizePixel  = 0
-Instance.new("UICorner", dT).CornerRadius = UDim.new(1,0)
+mkDiv(274)
+mkSlider(280, 296, "Teleport Speed", 10, 200, cfg.speed,
+    Color3.fromRGB(48,138,215),
+    function(v) return tostring(v) end,
+    function(v) cfg.speed=v end)
 
-local dF = Instance.new("Frame", dT)
-dF.Size             = UDim2.fromScale((cfg.sinkDepth or 15) / 50, 1)
-dF.BackgroundColor3 = Color3.fromRGB(160,80,220)
-dF.BorderSizePixel  = 0
-Instance.new("UICorner", dF).CornerRadius = UDim.new(1,0)
-
-local dV = Instance.new("TextLabel", main)
-dV.Size             = UDim2.new(1,-16,0,14)
-dV.Position         = UDim2.fromOffset(8, 216)
-dV.BackgroundTransparency = 1
-dV.Text             = tostring(cfg.sinkDepth or 15).." studs"
-dV.TextColor3       = Color3.fromRGB(160,80,220)
-dV.Font             = Enum.Font.GothamBold
-dV.TextSize         = 10
-dV.TextXAlignment   = Enum.TextXAlignment.Right
-
-local dSld = false
-dT.InputBegan:Connect(function(i)
-    if i.UserInputType == Enum.UserInputType.MouseButton1 then dSld = true end
-end)
-UIS.InputEnded:Connect(function(i)
-    if i.UserInputType == Enum.UserInputType.MouseButton1 then dSld = false end
-end)
-UIS.InputChanged:Connect(function(i)
-    if not dSld or i.UserInputType ~= Enum.UserInputType.MouseMovement then return end
-    local t = math.clamp((i.Position.X - dT.AbsolutePosition.X) / dT.AbsoluteSize.X, 0, 1)
-    cfg.sinkDepth = math.floor(1 + t * 49)  -- range 1 đến 50 studs
-    dF.Size = UDim2.fromScale(t, 1)
-    dV.Text = tostring(cfg.sinkDepth).." studs"
-    save()
-end)
-
-mkDiv(245)
-
--- TP Speed slider
-mkLbl(251,"Teleport Speed")
-local sT=Instance.new("Frame",main)
-sT.Size=UDim2.new(1,-16,0,6); sT.Position=UDim2.fromOffset(8,267)
-sT.BackgroundColor3=Color3.fromRGB(30,30,44); sT.BorderSizePixel=0
-Instance.new("UICorner",sT).CornerRadius=UDim.new(1,0)
-local sF=Instance.new("Frame",sT)
-sF.Size=UDim2.fromScale((cfg.speed-10)/190,1)
-sF.BackgroundColor3=Color3.fromRGB(48,138,215); sF.BorderSizePixel=0
-Instance.new("UICorner",sF).CornerRadius=UDim.new(1,0)
-local sV=Instance.new("TextLabel",main)
-sV.Size=UDim2.new(1,-16,0,14); sV.Position=UDim2.fromOffset(8,251)
-sV.BackgroundTransparency=1; sV.Text=tostring(cfg.speed)
-sV.TextColor3=Color3.fromRGB(78,178,130); sV.Font=Enum.Font.GothamBold
-sV.TextSize=10; sV.TextXAlignment=Enum.TextXAlignment.Right
-local sSld=false
-sT.InputBegan:Connect(function(i) if i.UserInputType==Enum.UserInputType.MouseButton1 then sSld=true end end)
-UIS.InputEnded:Connect(function(i) if i.UserInputType==Enum.UserInputType.MouseButton1 then sSld=false end end)
-UIS.InputChanged:Connect(function(i)
-    if not sSld or i.UserInputType~=Enum.UserInputType.MouseMovement then return end
-    local t=math.clamp((i.Position.X-sT.AbsolutePosition.X)/sT.AbsoluteSize.X,0,1)
-    cfg.speed=math.floor(10+t*190)
-    sF.Size=UDim2.fromScale(t,1); sV.Text=tostring(cfg.speed); save()
-end)
-
+-- ===== HOTKEY LABEL =====
 local hkLbl=Instance.new("TextLabel",main)
-hkLbl.Size=UDim2.new(1,-16,0,12); hkLbl.Position=UDim2.fromOffset(8,282)
+hkLbl.Size=UDim2.new(1,-16,0,12); hkLbl.Position=UDim2.fromOffset(8,308)
 hkLbl.BackgroundTransparency=1; hkLbl.Text="P=toggle  N=noclip  X=stop"
 hkLbl.TextColor3=Color3.fromRGB(75,75,95); hkLbl.Font=Enum.Font.Code
 hkLbl.TextSize=9; hkLbl.TextXAlignment=Enum.TextXAlignment.Center
 
-mkDiv(295)
-
--- ========== COPY JOB ID ==========
-local copyBtn = Instance.new("TextButton", main)
-copyBtn.Size             = UDim2.new(1,-16,0,28)
-copyBtn.Position         = UDim2.fromOffset(8, 300)
-copyBtn.BackgroundColor3 = Color3.fromRGB(40,80,140)
-copyBtn.BorderSizePixel  = 0
-copyBtn.Text             = "📋 Copy JobId Server Này"
-copyBtn.TextColor3       = Color3.fromRGB(255,255,255)
-copyBtn.Font             = Enum.Font.GothamBold
-copyBtn.TextSize         = 11
-Instance.new("UICorner", copyBtn).CornerRadius = UDim.new(0,6)
-
+-- ===== COPY JOBID =====
+mkDiv(323)
+local copyBtn=Instance.new("TextButton",main)
+copyBtn.Size=UDim2.new(1,-16,0,28); copyBtn.Position=UDim2.fromOffset(8,328)
+copyBtn.BackgroundColor3=Color3.fromRGB(40,80,140); copyBtn.BorderSizePixel=0
+copyBtn.Text="📋 Copy JobId Server Này"
+copyBtn.TextColor3=Color3.fromRGB(255,255,255); copyBtn.Font=Enum.Font.GothamBold
+copyBtn.TextSize=11
+Instance.new("UICorner",copyBtn).CornerRadius=UDim.new(0,6)
 copyBtn.MouseButton1Click:Connect(function()
     pcall(function() setclipboard(game.JobId) end)
-    copyBtn.Text = "✅ Đã copy JobId!"
-    copyBtn.BackgroundColor3 = Color3.fromRGB(30,120,60)
+    copyBtn.Text="✅ Đã copy!"; copyBtn.BackgroundColor3=Color3.fromRGB(30,120,60)
     task.wait(2)
-    copyBtn.Text = "📋 Copy JobId Server Này"
-    copyBtn.BackgroundColor3 = Color3.fromRGB(40,80,140)
+    copyBtn.Text="📋 Copy JobId Server Này"; copyBtn.BackgroundColor3=Color3.fromRGB(40,80,140)
 end)
 
--- ========== JOB ID INPUT ==========
-mkLbl(335, "Dán JobId muốn join vào đây")
-local jobBg = Instance.new("Frame", main)
-jobBg.Size             = UDim2.new(1,-16,0,30)
-jobBg.Position         = UDim2.fromOffset(8, 350)
-jobBg.BackgroundColor3 = Color3.fromRGB(24,24,32)
-jobBg.BorderSizePixel  = 0
-Instance.new("UICorner", jobBg).CornerRadius = UDim.new(0,6)
+-- ===== JOB ID INPUT =====
+mkLbl(362,"Dán JobId muốn join vào đây")
+local jobBg=Instance.new("Frame",main)
+jobBg.Size=UDim2.new(1,-16,0,30); jobBg.Position=UDim2.fromOffset(8,376)
+jobBg.BackgroundColor3=Color3.fromRGB(24,24,32); jobBg.BorderSizePixel=0
+Instance.new("UICorner",jobBg).CornerRadius=UDim.new(0,6)
 
-local jobBox = Instance.new("TextBox", jobBg)
-jobBox.Size              = UDim2.new(1,-12,1,0)
-jobBox.Position          = UDim2.fromOffset(6,0)
-jobBox.BackgroundTransparency = 1
-jobBox.Text              = ""
-jobBox.PlaceholderText   = "Dán JobId vào đây..."
-jobBox.PlaceholderColor3 = Color3.fromRGB(70,70,92)
-jobBox.TextColor3        = Color3.fromRGB(215,215,230)
-jobBox.Font              = Enum.Font.Code
-jobBox.TextSize          = 10
-jobBox.ClearTextOnFocus  = false
+local jobBox=Instance.new("TextBox",jobBg)
+jobBox.Size=UDim2.new(1,-12,1,0); jobBox.Position=UDim2.fromOffset(6,0)
+jobBox.BackgroundTransparency=1; jobBox.Text=""
+jobBox.PlaceholderText="Dán JobId vào đây..."
+jobBox.PlaceholderColor3=Color3.fromRGB(70,70,92)
+jobBox.TextColor3=Color3.fromRGB(215,215,230)
+jobBox.Font=Enum.Font.Code; jobBox.TextSize=10
+jobBox.ClearTextOnFocus=false
 
--- ========== AUTO JOIN ==========
-local autoJoinEnabled = false
-local autoJoinThread  = nil
+-- ===== AUTO JOIN =====
+local autoJoinEnabled=false
+local autoJoinThread=nil
 
-local joinBtn = Instance.new("TextButton", main)
-joinBtn.Size             = UDim2.new(1,-16,0,28)
-joinBtn.Position         = UDim2.fromOffset(8, 387)
-joinBtn.BackgroundColor3 = Color3.fromRGB(100,40,40)
-joinBtn.BorderSizePixel  = 0
-joinBtn.Text             = "🔄 Auto Join: OFF"
-joinBtn.TextColor3       = Color3.fromRGB(255,255,255)
-joinBtn.Font             = Enum.Font.GothamBold
-joinBtn.TextSize         = 12
-Instance.new("UICorner", joinBtn).CornerRadius = UDim.new(0,6)
+local joinBtn=Instance.new("TextButton",main)
+joinBtn.Size=UDim2.new(1,-16,0,28); joinBtn.Position=UDim2.fromOffset(8,412)
+joinBtn.BackgroundColor3=Color3.fromRGB(100,40,40); joinBtn.BorderSizePixel=0
+joinBtn.Text="🔄 Auto Join: OFF"
+joinBtn.TextColor3=Color3.fromRGB(255,255,255); joinBtn.Font=Enum.Font.GothamBold
+joinBtn.TextSize=12
+Instance.new("UICorner",joinBtn).CornerRadius=UDim.new(0,6)
 
-local joinLbl = Instance.new("TextLabel", main)
-joinLbl.Size             = UDim2.new(1,-16,0,16)
-joinLbl.Position         = UDim2.fromOffset(8, 420)
-joinLbl.BackgroundTransparency = 1
-joinLbl.Text             = ""
-joinLbl.TextColor3       = Color3.fromRGB(150,150,180)
-joinLbl.Font             = Enum.Font.Code
-joinLbl.TextSize         = 10
-joinLbl.TextXAlignment   = Enum.TextXAlignment.Center
+local joinLbl=Instance.new("TextLabel",main)
+joinLbl.Size=UDim2.new(1,-16,0,16); joinLbl.Position=UDim2.fromOffset(8,444)
+joinLbl.BackgroundTransparency=1; joinLbl.Text=""
+joinLbl.TextColor3=Color3.fromRGB(150,150,180); joinLbl.Font=Enum.Font.Code
+joinLbl.TextSize=10; joinLbl.TextXAlignment=Enum.TextXAlignment.Center
 
 local function stopAutoJoin()
-    autoJoinEnabled = false
-    if autoJoinThread then task.cancel(autoJoinThread); autoJoinThread = nil end
-    joinBtn.Text             = "🔄 Auto Join: OFF"
-    joinBtn.BackgroundColor3 = Color3.fromRGB(100,40,40)
-    joinLbl.Text             = ""
+    autoJoinEnabled=false
+    if autoJoinThread then task.cancel(autoJoinThread); autoJoinThread=nil end
+    joinBtn.Text="🔄 Auto Join: OFF"; joinBtn.BackgroundColor3=Color3.fromRGB(100,40,40)
+    joinLbl.Text=""
 end
 
 local function startAutoJoin()
-    local targetJob = jobBox.Text:gsub("%s+", "") -- xóa khoảng trắng
-
-    if targetJob == "" then
-        joinLbl.Text      = "❌ Chưa dán JobId!"
-        joinLbl.TextColor3 = Color3.fromRGB(255,80,80)
-        task.wait(2)
-        joinLbl.Text = ""
-        return
+    local targetJob=jobBox.Text:gsub("%s+","")
+    if targetJob=="" then
+        joinLbl.Text="❌ Chưa dán JobId!"; joinLbl.TextColor3=Color3.fromRGB(255,80,80)
+        task.wait(2); joinLbl.Text=""; return
     end
-
-    autoJoinEnabled = true
-    joinBtn.Text             = "🔴 Auto Join: ON"
-    joinBtn.BackgroundColor3 = Color3.fromRGB(30,120,60)
-
-    autoJoinThread = task.spawn(function()
+    autoJoinEnabled=true
+    joinBtn.Text="🔴 Auto Join: ON"; joinBtn.BackgroundColor3=Color3.fromRGB(30,120,60)
+    autoJoinThread=task.spawn(function()
         while autoJoinEnabled do
-            -- hiện jobid đang nhắm đến
-            joinLbl.TextColor3 = Color3.fromRGB(150,150,180)
-
-            for i = 5, 1, -1 do
+            joinLbl.TextColor3=Color3.fromRGB(150,150,180)
+            for i=5,1,-1 do
                 if not autoJoinEnabled then return end
-                joinLbl.Text = "⏱ Join sau "..i.."s → "..targetJob:sub(1,8).."..."
+                joinLbl.Text="⏱ Join sau "..i.."s → "..targetJob:sub(1,8).."..."
                 task.wait(1)
             end
-
             if not autoJoinEnabled then return end
-
-            joinLbl.Text      = "🚀 Đang join..."
-            joinLbl.TextColor3 = Color3.fromRGB(255,200,50)
-
-            local ok, err = pcall(function()
-                game:GetService("TeleportService"):TeleportToPlaceInstance(
-                    game.PlaceId,
-                    targetJob,
-                    lp
-                )
+            joinLbl.Text="🚀 Đang join..."; joinLbl.TextColor3=Color3.fromRGB(255,200,50)
+            local ok,err=pcall(function()
+                game:GetService("TeleportService"):TeleportToPlaceInstance(game.PlaceId,targetJob,lp)
             end)
-
             if not ok then
-                joinLbl.Text      = "❌ Lỗi: "..tostring(err):sub(1,20)
-                joinLbl.TextColor3 = Color3.fromRGB(255,80,80)
+                joinLbl.Text="❌ Lỗi: "..tostring(err):sub(1,20)
+                joinLbl.TextColor3=Color3.fromRGB(255,80,80)
             end
-
             task.wait(5)
         end
     end)
 end
 
 joinBtn.MouseButton1Click:Connect(function()
-    if autoJoinEnabled then
-        stopAutoJoin()
-    else
-        startAutoJoin()
-    end
+    if autoJoinEnabled then stopAutoJoin() else startAutoJoin() end
 end)
-
--- resize frame
-main.Size = UDim2.fromOffset(265, 445)
 
 -- =====================================================
 --  AUTO START
 -- =====================================================
 task.wait(0.5)
+
+-- theo dõi chết cho character hiện tại
+local function watchDeath()
+    local char = lp.Character
+    if not char then return end
+    local hum = char:FindFirstChildOfClass("Humanoid")
+    if not hum then return end
+    hum.Died:Connect(function()
+        isDead  = true
+        stopped = true
+        if not cfg.manualNoclip then setNoclip(false) end
+        setStatus("💀 Đã chết! Chờ respawn...", Color3.fromRGB(200,80,80))
+    end)
+end
+watchDeath()
+
 if cfg.active and cfg.targetName ~= "" then
     startTP()
 else
