@@ -1,4 +1,85 @@
 -- =====================================================
+--  REMOVE WATER - chạy NGAY khi script load
+--  (không cần chờ gì cả)
+-- =====================================================
+task.spawn(function()
+    local terrain = workspace:WaitForChild("Terrain")
+
+    local function removeWater()
+        local lp  = game.Players.LocalPlayer
+        local char = lp.Character or lp.CharacterAdded:Wait()
+        local hrp  = char:WaitForChild("HumanoidRootPart")
+
+        local pos       = hrp.Position
+        local chunkSize = 512
+        local height    = 400
+        local total     = 0
+
+        for ox = -2, 2 do
+            for oz = -2, 2 do
+                local center = pos + Vector3.new(ox * chunkSize, 0, oz * chunkSize)
+                local half   = Vector3.new(chunkSize/2, height/2, chunkSize/2)
+                local reg    = Region3.new(center - half, center + half)
+
+                local ok, mats, occs = pcall(function()
+                    return terrain:ReadVoxels(reg, 4)
+                end)
+                if ok then
+                    local count = 0
+                    for x=1,#mats do for y=1,#mats[x] do for z=1,#mats[x][y] do
+                        if mats[x][y][z] == Enum.Material.Water then
+                            mats[x][y][z] = Enum.Material.Air
+                            occs[x][y][z] = 0
+                            count = count + 1
+                        end
+                    end end end
+                    if count > 0 then
+                        pcall(function() terrain:WriteVoxels(reg, 4, mats, occs) end)
+                        total = total + count
+                    end
+                end
+                task.wait(0.05)
+            end
+        end
+
+        -- Tắt WaterBlur + WaterTint
+        local lighting = game:GetService("Lighting")
+        for _, v in ipairs(lighting:GetChildren()) do
+            if v.Name == "WaterBlur" or v.Name == "WaterTint" then
+                v.Enabled = false
+            end
+        end
+
+        -- Ẩn BasePart water trong Map
+        local nameSet = {
+            ShallowWater=true, WaterSandFloor=true, WaterSandFloor1=true,
+            WaterSandFloor2=true, WaterSandFloor3=true, WaterFlow=true,
+            waterplaceholder=true, Waterplaceholder=true, RiverBed=true
+        }
+        local mapFolder = workspace:FindFirstChild("Map")
+        if mapFolder then
+            for _, v in ipairs(mapFolder:GetChildren()) do
+                if v:IsA("BasePart") and nameSet[v.Name] then
+                    v.Transparency = 1
+                    v.CanCollide   = false
+                end
+            end
+        end
+
+        print("💧 Water removed: " .. total .. " cells")
+    end
+
+    -- Xóa lần đầu
+    removeWater()
+
+    -- Xóa lại mỗi khi respawn (phòng game reset water)
+    game.Players.LocalPlayer.CharacterAdded:Connect(function()
+        task.wait(3)
+        removeWater()
+    end)
+end)
+
+-- =====================================================
 --  PLAYER TELEPORT v5 - WALK THEN TELEPORT
 --  Đi bộ pathfinding trước → chui đất → teleport
 --  Chết → chờ respawn → lặp lại tự động
@@ -150,23 +231,17 @@ local function walkPhase()
 end
 
 -- =====================================================
---  BƯỚC 2: CHUI ĐẤT + TELEPORT
--- =====================================================
--- =====================================================
---  TELEPORT PHASE - LIÊN TỤC THEO TARGET
--- =====================================================
--- =====================================================
---  TELEPORT PHASE - dùng step-teleport theo target liên tục
+--  BƯỚC 2: CHUI ĐẤT → DI CHUYỂN X,Z → NỔI LÊN → FOLLOW
 -- =====================================================
 local function teleportPhase()
     setNoclip(true)
-
-    -- Chui xuống đất 1 lần
     setStatus("⬇️ Chui xuống đất...", Color3.fromRGB(180,120,255))
+
     local hrp = getHRP()
     if not hrp then return end
     local undergroundY = hrp.Position.Y - (cfg.sinkDepth or 15)
 
+    -- Chui xuống
     local sinkConn
     sinkConn = RS.Heartbeat:Connect(function(dt)
         local h = getHRP()
@@ -185,62 +260,124 @@ local function teleportPhase()
     pcall(function() sinkConn:Disconnect() end)
     if isDead or stopped then return end
 
-    -- Lấy Y cố định dưới đất
     local h = getHRP()
     if not h then return end
     local lockedY = h.Position.Y
 
-    -- ── STEP-TELEPORT LOOP (từ NMA MOV) ──
-    -- target là Vector3 cập nhật liên tục theo player
-    local followTarget = nil
+    -- PHASE 1: Di chuyển X,Z dưới đất đến sát target
+    setStatus("⚡ Di chuyển dưới đất...", Color3.fromRGB(255,200,50))
+    local reachedXZ = false
 
-    -- Thread cập nhật followTarget theo target player
-    local updateConn = RS.Heartbeat:Connect(function()
-        local thrp = getTargetHRP()
-        if thrp then
-            -- Giữ Y dưới đất, chỉ theo X,Z của target
-            followTarget = Vector3.new(thrp.Position.X, lockedY, thrp.Position.Z)
-        end
-    end)
-
-    -- Step-teleport loop: di chuyển từng bước về followTarget
-    local stepConn = RS.Heartbeat:Connect(function(dt)
-        if isDead or stopped then return end
-        if not followTarget then return end
-
+    local stepConn
+    stepConn = RS.Heartbeat:Connect(function(dt)
+        if isDead or stopped then pcall(function() stepConn:Disconnect() end) return end
         local hrp2 = getHRP()
-        if not hrp2 then return end
+        local thrp = getTargetHRP()
+        if not hrp2 or not thrp then return end
 
-        local dir  = followTarget - hrp2.Position
+        local dest = Vector3.new(thrp.Position.X, lockedY, thrp.Position.Z)
+        local dir  = dest - hrp2.Position
         local dist = dir.Magnitude
         local step = cfg.speed * dt
 
-        if dist <= step then
-            -- Đã sát → snap vào luôn
-            hrp2.CFrame = CFrame.new(followTarget)
-            hrp2.AssemblyLinearVelocity  = Vector3.zero
-            hrp2.AssemblyAngularVelocity = Vector3.zero
-            setStatus("✅ Sát " .. cfg.targetName, Color3.fromRGB(80,220,130))
+        if dist <= 3 then
+            reachedXZ = true
+            pcall(function() stepConn:Disconnect() end)
             return
         end
 
-        -- Di chuyển step
-        local newPos = hrp2.Position + dir.Unit * step
+        local newPos = hrp2.Position + dir.Unit * math.min(step, dist)
         hrp2.CFrame  = CFrame.new(newPos)
         hrp2.AssemblyLinearVelocity  = Vector3.zero
         hrp2.AssemblyAngularVelocity = Vector3.zero
 
-        setStatus(string.format("🎯 Theo %s | %.0f studs", cfg.targetName, dist),
+        setStatus(string.format("⚡ Dưới đất → %.0f studs", dist),
             Color3.fromRGB(255,200,50))
     end)
 
-    -- Giữ phase sống đến khi chết/dừng
+    while not isDead and not stopped and not reachedXZ do
+        task.wait(0.1)
+    end
+    pcall(function() stepConn:Disconnect() end)
+    if isDead or stopped then return end
+
+    -- PHASE 2: Nổi lên đến Y của target
+    setStatus("⬆️ Nổi lên...", Color3.fromRGB(100,255,150))
+
+    local riseConn
+    riseConn = RS.Heartbeat:Connect(function(dt)
+        if isDead or stopped then pcall(function() riseConn:Disconnect() end) return end
+        local hrp3 = getHRP()
+        local thrp = getTargetHRP()
+        if not hrp3 or not thrp then return end
+
+        local destY = thrp.Position.Y + cfg.offset
+        local curY  = hrp3.Position.Y
+        local distY = math.abs(destY - curY)
+        local step  = cfg.speed * dt
+
+        if distY <= 2 then
+            pcall(function() riseConn:Disconnect() end)
+            return
+        end
+
+        local newY = curY + math.min(step, distY) * (destY > curY and 1 or -1)
+        hrp3.CFrame = CFrame.new(hrp3.Position.X, newY, hrp3.Position.Z)
+        hrp3.AssemblyLinearVelocity  = Vector3.zero
+        hrp3.AssemblyAngularVelocity = Vector3.zero
+
+        setStatus(string.format("⬆️ Nổi lên... %.0f studs", distY),
+            Color3.fromRGB(100,255,150))
+    end)
+
+    -- Chờ nổi lên xong
+    task.wait(0.5)
+    local riseWait = 0
+    while not isDead and not stopped and riseWait < 10 do
+        local hrp3 = getHRP()
+        local thrp = getTargetHRP()
+        if hrp3 and thrp and math.abs(hrp3.Position.Y - thrp.Position.Y) <= 2 then break end
+        task.wait(0.1); riseWait = riseWait + 0.1
+    end
+    pcall(function() riseConn:Disconnect() end)
+    if isDead or stopped then return end
+
+    -- PHASE 3: Follow liên tục cả X,Y,Z
+    setStatus("✅ Đã đến! Follow " .. cfg.targetName, Color3.fromRGB(80,220,130))
+
+    local followConn
+    followConn = RS.Heartbeat:Connect(function(dt)
+        if isDead or stopped then pcall(function() followConn:Disconnect() end) return end
+        local hrp4 = getHRP()
+        local thrp = getTargetHRP()
+        if not hrp4 or not thrp then return end
+
+        local dest = thrp.Position + Vector3.new(0, cfg.offset, 0)
+        local dir  = dest - hrp4.Position
+        local dist = dir.Magnitude
+        local step = cfg.speed * dt
+
+        if dist <= 2 then
+            setStatus("✅ Sát " .. cfg.targetName, Color3.fromRGB(80,220,130))
+            return
+        end
+
+        local newPos = hrp4.Position + dir.Unit * math.min(step, dist)
+        hrp4.CFrame  = CFrame.new(newPos)
+        hrp4.AssemblyLinearVelocity  = Vector3.zero
+        hrp4.AssemblyAngularVelocity = Vector3.zero
+
+        setStatus(string.format("🎯 Follow %s | %.0f studs", cfg.targetName, dist),
+            Color3.fromRGB(255,200,50))
+    end)
+
+    -- Giữ sống đến khi chết/dừng
     while not isDead and not stopped do
         task.wait(0.5)
     end
 
-    pcall(function() updateConn:Disconnect() end)
-    pcall(function() stepConn:Disconnect()   end)
+    pcall(function() riseConn:Disconnect()   end)
+    pcall(function() followConn:Disconnect() end)
 end
 
 -- =====================================================
@@ -257,18 +394,13 @@ local function runSequence()
             local hum = getHum()
             if not hum or hum.Health <= 0 then task.wait(0.5); continue end
 
-            -- đi bộ
             walkPhase()
             if isDead or stopped then task.wait(0.5); continue end
 
-            -- chui đất + teleport
             teleportPhase()
-            if isDead or stopped then task.wait(0.5); continue end
-
-            -- chờ chết
-            setStatus("✅ Đã đến! Chờ lần tiếp...", Color3.fromRGB(80,220,130))
-            while not isDead and not stopped do
-                task.wait(0.5)
+            if isDead then
+                setStatus("💀 Chờ respawn...", Color3.fromRGB(200,80,80))
+                task.wait(1)
             end
             task.wait(0.5)
         end
@@ -298,7 +430,7 @@ local function stopTP(reason)
 end
 
 -- =====================================================
---  RESPAWN - chờ load xong mới bắt đầu
+--  RESPAWN
 -- =====================================================
 _G.PTP_RespConn = lp.CharacterAdded:Connect(function(char)
     char:WaitForChild("HumanoidRootPart")
@@ -310,12 +442,9 @@ _G.PTP_RespConn = lp.CharacterAdded:Connect(function(char)
 
     setStatus("⏳ Chờ respawn...", Color3.fromRGB(200,200,80))
 
-    -- chờ health > 0
     local hum = char:FindFirstChildOfClass("Humanoid")
     if not hum then return end
     while hum.Health <= 0 do task.wait(0.1) end
-
-    -- chờ thêm 2s cho chắc
     task.wait(2)
 
     if not cfg.active or cfg.targetName == "" then
@@ -323,7 +452,6 @@ _G.PTP_RespConn = lp.CharacterAdded:Connect(function(char)
         return
     end
 
-    -- theo dõi chết
     hum.Died:Connect(function()
         isDead  = true
         stopped = true
@@ -470,8 +598,8 @@ local function mkToggle(y,label,init,onChange)
     rb.Size=UDim2.new(1,-56,1,0); rb.BackgroundTransparency=1; rb.Text=""
     rb.MouseButton1Click:Connect(toggle)
 end
-local function mkSlider(yLbl, yBar, label, min, max, valCfg, color, fmt, onChange)
-    mkLbl(yLbl, label)
+local function mkSlider(yLbl,yBar,label,min,max,valCfg,color,fmt,onChange)
+    mkLbl(yLbl,label)
     local bar=Instance.new("Frame",main)
     bar.Size=UDim2.new(1,-16,0,6); bar.Position=UDim2.fromOffset(8,yBar)
     bar.BackgroundColor3=Color3.fromRGB(30,30,44); bar.BorderSizePixel=0
@@ -497,7 +625,7 @@ local function mkSlider(yLbl, yBar, label, min, max, valCfg, color, fmt, onChang
     end)
 end
 
--- ===== NAME INPUT =====
+-- NAME INPUT
 mkLbl(70,"Tên người chơi")
 local nameBg=Instance.new("Frame",main)
 nameBg.Size=UDim2.new(1,-16,0,30); nameBg.Position=UDim2.fromOffset(8,84)
@@ -549,7 +677,6 @@ local function refreshDrop(f)
 end
 nameBox:GetPropertyChangedSignal("Text"):Connect(function() refreshDrop(nameBox.Text) end)
 
--- ===== TOGGLES =====
 mkDiv(122)
 mkToggle(128,"Bật script",cfg.active,function(on)
     cfg.active=on; save()
@@ -560,33 +687,30 @@ mkToggle(172,"Noclip thường trực",cfg.manualNoclip,function(on)
     cfg.manualNoclip=on; save(); setNoclip(on)
 end)
 
--- ===== SLIDERS =====
 mkDiv(210)
-mkSlider(216, 232, "Thời gian đi bộ (giây)", 1, 20, cfg.walkTime,
+mkSlider(216,232,"Thời gian đi bộ (giây)",1,20,cfg.walkTime,
     Color3.fromRGB(80,180,255),
     function(v) return v.."s" end,
     function(v) cfg.walkTime=v end)
 
 mkDiv(242)
-mkSlider(248, 264, "Độ sâu chui xuống (studs)", 1, 50, cfg.sinkDepth,
+mkSlider(248,264,"Độ sâu chui xuống (studs)",1,50,cfg.sinkDepth,
     Color3.fromRGB(160,80,220),
     function(v) return v.." studs" end,
     function(v) cfg.sinkDepth=v end)
 
 mkDiv(274)
-mkSlider(280, 296, "Teleport Speed", 10, 200, cfg.speed,
+mkSlider(280,296,"Teleport Speed",10,200,cfg.speed,
     Color3.fromRGB(48,138,215),
     function(v) return tostring(v) end,
     function(v) cfg.speed=v end)
 
--- ===== HOTKEY LABEL =====
 local hkLbl=Instance.new("TextLabel",main)
 hkLbl.Size=UDim2.new(1,-16,0,12); hkLbl.Position=UDim2.fromOffset(8,308)
 hkLbl.BackgroundTransparency=1; hkLbl.Text="P=toggle  N=noclip  X=stop"
 hkLbl.TextColor3=Color3.fromRGB(75,75,95); hkLbl.Font=Enum.Font.Code
 hkLbl.TextSize=9; hkLbl.TextXAlignment=Enum.TextXAlignment.Center
 
--- ===== COPY JOBID =====
 mkDiv(323)
 local copyBtn=Instance.new("TextButton",main)
 copyBtn.Size=UDim2.new(1,-16,0,28); copyBtn.Position=UDim2.fromOffset(8,328)
@@ -602,7 +726,6 @@ copyBtn.MouseButton1Click:Connect(function()
     copyBtn.Text="📋 Copy JobId Server Này"; copyBtn.BackgroundColor3=Color3.fromRGB(40,80,140)
 end)
 
--- ===== JOB ID INPUT =====
 mkLbl(362,"Dán JobId muốn join vào đây")
 local jobBg=Instance.new("Frame",main)
 jobBg.Size=UDim2.new(1,-16,0,30); jobBg.Position=UDim2.fromOffset(8,376)
@@ -618,7 +741,6 @@ jobBox.TextColor3=Color3.fromRGB(215,215,230)
 jobBox.Font=Enum.Font.Code; jobBox.TextSize=10
 jobBox.ClearTextOnFocus=false
 
--- ===== AUTO JOIN =====
 local autoJoinEnabled=false
 local autoJoinThread=nil
 
@@ -682,7 +804,6 @@ end)
 -- =====================================================
 task.wait(0.5)
 
--- theo dõi chết cho character hiện tại
 local function watchDeath()
     local char = lp.Character
     if not char then return end
@@ -703,4 +824,4 @@ else
     setStatus(cfg.targetName=="" and "Nhập tên player để bắt đầu" or "Đã tắt")
 end
 
-print("[PTP v5 WTP] loaded!")
+print("[PTP v5 WTP + Water Remover] loaded!")
