@@ -351,9 +351,14 @@ end
 -- =====================================================
 --  RESPAWN
 -- =====================================================
+local _diedConn = nil  -- thêm dòng này TRƯỚC _G.PTP_RespConn
+
 _G.PTP_RespConn = lp.CharacterAdded:Connect(function(char)
     char:WaitForChild("HumanoidRootPart")
     char:WaitForChild("Humanoid")
+
+    -- disconnect Died cũ trước khi tạo mới
+    if _diedConn then _diedConn:Disconnect(); _diedConn = nil end
 
     isDead  = false
     stopped = false
