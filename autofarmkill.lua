@@ -613,7 +613,7 @@ mkSlider(216,232,"Thời gian đi bộ (giây)",1,20,cfg.walkTime,
     function(v) cfg.walkTime=v end)
 
 mkDiv(242)
-mkSlider(248,264,"Độ sâu chui xuống (studs)",1,50,cfg.sinkDepth,
+mkSlider(248,264,"Độ sâu chui xuống (studs)",1,150,cfg.sinkDepth,
     Color3.fromRGB(160,80,220),
     function(v) return v.." studs" end,
     function(v) cfg.sinkDepth=v end)
