@@ -152,22 +152,25 @@ end
 -- =====================================================
 --  BƯỚC 2: CHUI ĐẤT + TELEPORT
 -- =====================================================
+-- =====================================================
+--  TELEPORT PHASE - LIÊN TỤC THEO TARGET
+-- =====================================================
 local function teleportPhase()
     setNoclip(true)
-    setStatus("⬇️ Chui xuống đất...", Color3.fromRGB(180,120,255))
 
+    -- Chui xuống đất 1 lần
+    setStatus("⬇️ Chui xuống đất...", Color3.fromRGB(180,120,255))
     local hrp = getHRP()
     if not hrp then return end
     local undergroundY = hrp.Position.Y - (cfg.sinkDepth or 15)
 
-    -- chui xuống
     local sinkConn
     sinkConn = RS.Heartbeat:Connect(function(dt)
         local h = getHRP()
-        if not h then sinkConn:Disconnect() return end
-        if h.Position.Y <= undergroundY then sinkConn:Disconnect() return end
+        if not h then pcall(function() sinkConn:Disconnect() end) return end
+        if h.Position.Y <= undergroundY then pcall(function() sinkConn:Disconnect() end) return end
         h.CFrame = CFrame.new(h.Position.X, h.Position.Y - 60*dt, h.Position.Z)
-        h.AssemblyLinearVelocity = Vector3.zero
+        h.AssemblyLinearVelocity  = Vector3.zero
         h.AssemblyAngularVelocity = Vector3.zero
     end)
 
@@ -179,73 +182,88 @@ local function teleportPhase()
     pcall(function() sinkConn:Disconnect() end)
     if isDead or stopped then return end
 
+    -- Lấy Y hiện tại (dưới đất)
     local h = getHRP()
     if not h then return end
     local lockedY = h.Position.Y
 
-    -- di chuyển ngang đến X,Z của target, lock Y
-    setStatus("⚡ Teleport dưới đất...", Color3.fromRGB(255,200,50))
+    -- LIÊN TỤC THEO TARGET cho đến khi chết/dừng
+    setStatus("🔄 Đang theo dõi target...", Color3.fromRGB(255,200,50))
 
-    local tpConn
-    tpConn = RS.Heartbeat:Connect(function(dt)
-        if isDead or stopped then tpConn:Disconnect() return end
+    local followConn
+    followConn = RS.Heartbeat:Connect(function(dt)
+        if isDead or stopped then
+            pcall(function() followConn:Disconnect() end)
+            return
+        end
+
         local hrp2 = getHRP()
         local thrp = getTargetHRP()
         if not hrp2 or not thrp then return end
+
+        -- Luôn cập nhật lockedY theo target (phòng target lên cao/xuống thấp)
+        -- giữ Y dưới đất ổn định, chỉ di chuyển X,Z
         local dest = Vector3.new(thrp.Position.X, lockedY, thrp.Position.Z)
         local dir  = dest - hrp2.Position
         local dist = dir.Magnitude
-        if dist < 3 then tpConn:Disconnect() return end
+
+        if dist < 2 then
+            -- Đã sát target → cập nhật status
+            setStatus("✅ Sát target: " .. cfg.targetName, Color3.fromRGB(80,220,130))
+            return
+        end
+
+        -- Di chuyển về phía target
         local step   = cfg.speed * dt
         local newPos = hrp2.Position + dir.Unit * math.min(step, dist)
         hrp2.CFrame  = CFrame.new(newPos.X, lockedY, newPos.Z)
         hrp2.AssemblyLinearVelocity  = Vector3.zero
         hrp2.AssemblyAngularVelocity = Vector3.zero
+
+        setStatus(string.format("🎯 Theo %s | %.0f studs", cfg.targetName, dist),
+            Color3.fromRGB(255,200,50))
     end)
 
+    -- Giữ phase này sống cho đến khi chết/dừng
     while not isDead and not stopped do
-        local hrp2 = getHRP()
-        local thrp = getTargetHRP()
-        if hrp2 and thrp then
-            local dest = Vector3.new(thrp.Position.X, lockedY, thrp.Position.Z)
-            if (hrp2.Position - dest).Magnitude < 3 then break end
-        end
-        task.wait(0.1)
+        task.wait(0.5)
     end
-    pcall(function() tpConn:Disconnect() end)
-    if isDead or stopped then return end
+    pcall(function() followConn:Disconnect() end)
+end
 
-    -- nổi lên đến target
-    setStatus("⬆️ Nổi lên...", Color3.fromRGB(100,255,150))
+-- =====================================================
+--  MAIN SEQUENCE - đi bộ 1 lần rồi follow mãi
+-- =====================================================
+local function runSequence()
+    if _G.PTP_Main then task.cancel(_G.PTP_Main) end
+    _G.PTP_Main = task.spawn(function()
+        while true do
+            -- Chờ điều kiện hợp lệ
+            while not cfg.active or cfg.targetName == "" or stopped do
+                task.wait(0.5)
+            end
 
-    local riseConn
-    riseConn = RS.Heartbeat:Connect(function(dt)
-        if isDead or stopped then riseConn:Disconnect() return end
-        local hrp3 = getHRP()
-        local thrp = getTargetHRP()
-        if not hrp3 or not thrp then riseConn:Disconnect() return end
-        local dest = thrp.Position + Vector3.new(0, cfg.offset, 0)
-        local dir  = dest - hrp3.Position
-        local dist = dir.Magnitude
-        if dist < 2 then
-            riseConn:Disconnect()
-            setStatus("✅ Đã đến!", Color3.fromRGB(80,220,130))
-            return
+            local hum = getHum()
+            if not hum or hum.Health <= 0 then task.wait(0.5); continue end
+
+            -- Bước 1: Đi bộ pathfinding lại gần
+            setStatus("🚶 Đi bộ lại gần...", Color3.fromRGB(100,180,255))
+            walkPhase()
+            if isDead or stopped then task.wait(0.5); continue end
+
+            -- Bước 2: Chui đất + LIÊN TỤC follow cho đến khi chết
+            teleportPhase()
+
+            -- Sau khi thoát (chết/dừng) → chờ respawn
+            if isDead then
+                setStatus("💀 Chờ respawn...", Color3.fromRGB(200,80,80))
+                -- CharacterAdded sẽ tự restart
+                task.wait(1)
+            end
+
+            task.wait(0.5)
         end
-        local step   = cfg.speed * dt
-        local newPos = hrp3.Position + dir.Unit * math.min(step, dist)
-        hrp3.CFrame  = CFrame.new(newPos)
-        hrp3.AssemblyLinearVelocity  = Vector3.zero
-        hrp3.AssemblyAngularVelocity = Vector3.zero
     end)
-
-    while not isDead and not stopped do
-        local hrp3 = getHRP()
-        local thrp = getTargetHRP()
-        if hrp3 and thrp and (hrp3.Position - thrp.Position).Magnitude < 2 then break end
-        task.wait(0.1)
-    end
-    pcall(function() riseConn:Disconnect() end)
 end
 
 -- =====================================================
